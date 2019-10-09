@@ -1,0 +1,174 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'fileutils'
+require 'shellwords'
+require 'zlib'
+require 'yaml'
+
+require 'pp'
+require 'byebug'
+
+$VERBOSE = nil
+STDOUT.sync = true
+
+TAR_OPTS = '--numeric-owner'
+
+# file types skipped/ignored
+SKIPPED_FTYPES = %w{ socket unknown characterSpecial blockSpecial } # file directory link fifo
+SKIPPED_FOLDERS = %w{ . .. }
+
+# opzioni di default
+options = {
+  src_dir:  nil,
+  dst_dir:  nil,
+  one_fs:   false,
+  zip_zip:  :xz,
+  zip_unz:  :xzcat,
+  zip_ext:  :txz,
+}
+
+# --- gestione opzioni ---------------------------------------------------------
+# imposta opzioni da riga di comando
+optparser = OptionParser.new do |op|
+  op.banner = "USAGE: #{File.basename $0} [options] <folder-to-backup> <repository-folder>"
+ 
+  op.on('-x', '--one-file-system', "don't cross filesystem boundaries\t(def. #{options[:one_fs]})"){ options[:one_fs] = true }
+  op.on('-g', '--gzip', "use gzip instead of xz\t(def. #{options[:zip_zip]})"){ options.merge! zip_zip: :gzip, zip_unz: :zcat, zip_ext: :tgz }
+  op.on('-G', '--pigz', "use pigz instead of xz\t(def. #{options[:zip_zip]})"){ options.merge! zip_zip: :pigz, zip_unz: :zcat, zip_ext: :tgz }
+  
+  op.on '-h', '--help', 'display this help' do
+    puts op
+    exit
+  end
+end
+
+begin
+  optparser.parse! ARGV
+rescue OptionParser::ParseError => e
+  puts e
+  exit
+rescue SystemExit
+  exit
+end
+
+options[:src_dir], options[:dst_dir] = ARGV
+
+unless options[:src_dir] && File.exist?(options[:src_dir]) &&
+       options[:dst_dir] && File.exist?(options[:dst_dir])
+  puts optparser
+  exit
+end
+
+options[:src_dir] = File.expand_path options[:src_dir]
+options[:dst_dir] = File.expand_path options[:dst_dir]
+options[:src_dev] = File.lstat(options[:src_dir]).dev
+# number of chars to trim from beginnin of file names to store them on the DB
+options[:src_size]  = options[:src_dir].size
+options[:src_size] += 1 if options[:src_dir] != '/'
+
+# --- folder parsing -----------------------------------------------------------
+# recursively scan folder, build DB, and write log file
+def stat_folder(folder, db, log, options)
+  print "#{db.size} files\r"
+  
+  Dir.entries(folder).each do |f|
+    next if SKIPPED_FOLDERS.include?(f)
+
+    fp = File.join  folder, f
+    s  = File.lstat fp
+
+    next if SKIPPED_FTYPES.include?(s.ftype)
+
+    fkey = fp[options[:src_size] .. -1] # trim base path
+    db[fkey]  = [s.gid, s.uid, s.mode].join('|') + '/' + [s.ftype[0], s.size, s.mtime.to_i].join('|')
+    db[fkey] += "|#{File.readlink(fp)}" if s.symlink?
+
+    log.puts "#{db[fkey]}\t#{fkey}"
+
+    STDERR.puts fp.ljust(40) if s.directory? && options[:src_dev] != s.dev
+    
+    stat_folder(fp, db, log, options) if s.directory? && options[:src_dev] == s.dev
+  end
+end # stat_folder
+
+# create base folder in the repository
+cur_ts = File.join options[:dst_dir], Time.now.strftime('%F_%T')
+FileUtils.mkdir_p cur_ts
+
+# populate current data
+cur_db = {} # file_path => stat data
+Zlib::GzipWriter.open(File.join cur_ts, 'stats.dat') do |gz|
+  gz.mtime, gz.orig_name = Time.now, 'stats.dat'
+  stat_folder options[:src_dir], cur_db, gz, options
+  #gz.puts File.read('stats.test').split("\n").each{|l| p,n=l.split("\t"); cur_db[n]=p } # TEMP: read from cache file
+  puts "#{cur_db.size} files"
+end
+
+# load previous data from disk
+old_ts = Dir[File.join options[:dst_dir], '????-??-??_??:??:??'].sort[-2..-2]
+old_ts = old_ts.first if old_ts.is_a?(Array)
+old_db = {} # file_path => stat data
+Zlib::GzipReader.open(File.join old_ts, 'stats.dat') do |gz|
+  gz.each_line do |line|
+    props, name = line.strip.split "\t"
+    old_db[name] = props
+  end
+end if old_ts
+
+unless old_ts
+  Dir.chdir options[:src_dir]
+  fdest = File.join(cur_ts, "files.#{options[:zip_ext]}").shellescape
+  system "tar #{TAR_OPTS} -cpf - . | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
+  exit
+end
+
+# compare the last two DBs
+to_arc = [] # files to archive (different type/size/mtime)
+diffs  = {} # files with different GID/UID/Mode
+old_db.each do |name, o_props|
+  if c_props = cur_db[name]
+    if o_props != c_props
+      o_gum, o_tsm = o_props.split('/')
+      c_gum, c_tsm = c_props.split('/')
+      if o_tsm != c_tsm
+        to_arc << name if c_tsm[0] != 'd' # don't archive directories
+      else
+        o_gid, o_uid, o_mode = o_gum.split("|")
+        c_gid, c_uid, c_mode = c_gum.split("|")
+        diffs[name] = {}
+        diffs[name][:gid ] = c_gid .to_i if o_gid  != c_gid
+        diffs[name][:uid ] = c_uid .to_i if o_uid  != c_uid
+        diffs[name][:mode] = c_mode.to_i if o_mode != c_mode        
+      end
+    end
+    
+    cur_db.delete name
+  else
+    diffs[name] = :rm
+  end
+end
+to_arc += cur_db.keys # add new files
+
+# archive changed/new files
+if to_arc.size > 0
+  puts "#{to_arc.size} new/modified files"
+  flist = File.join(cur_ts, 'arc-list.tmp')
+  fdest = File.join(cur_ts, "files.#{options[:zip_ext]}")
+  File.open(flist, 'w'){|f| f.puts to_arc }
+  tar_opts = "-C #{options[:src_dir]} -cpf - --verbatim-files-from --files-from #{flist.shellescape}"
+  system "tar #{TAR_OPTS} #{tar_opts} | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
+  File.unlink flist
+end
+
+# save differences in UID/GID/Mode
+if diffs.size > 0
+  puts "#{diffs.size} files removed/attr.changed"
+  Zlib::GzipWriter.open(File.join cur_ts, 'diff.ymz') do |gz|
+    gz.mtime, gz.orig_name = Time.now, 'diff.yml'
+    gz.puts diffs.to_yaml
+  end
+end
+
+# remove folder if nothing has changed
+FileUtils.rm_rf(cur_ts) if (to_arc.size + diffs.size) == 0
