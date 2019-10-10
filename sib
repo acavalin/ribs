@@ -31,7 +31,7 @@ options = {
 
 # imposta opzioni da riga di comando
 optparser = OptionParser.new do |op|
-  op.banner = "USAGE: #{File.basename $0} [switches] <target-folder> <repository-folder>"
+  op.banner = "USAGE: #{File.basename $0} [switches] <repository-folder> <target-folder>"
   op.on('-b', '--backup'              , "create/update the incremental backup"        ){ options.merge! action: :backup }
   op.on('-r', '--restore'             , "restores the last version of the backup"     ){ options.merge! action: :restore, target: :last }
   op.on('-R', '--restore-ts TIMESTAMP', "restores the specified version of the backup"){|ts| options.merge! action: :restore, target: ts }
@@ -50,11 +50,11 @@ rescue SystemExit
   exit 1
 end
 
-options[:src_dir], options[:dst_dir] = ARGV
+options[:dst_dir], options[:src_dir] = ARGV
 
-die(optparser, 1) unless options[:src_dir] && File.exist?(options[:src_dir]) &&
-                         options[:dst_dir] && File.exist?(options[:dst_dir]) &&
-                         options[:action]
+die("invalid repository", 1) unless options[:dst_dir] && File.exist?(options[:dst_dir])
+die("invalid target"    , 1) unless options[:src_dir] && File.exist?(options[:src_dir])
+die("no b/r/l switch fround", 1) unless options[:action]
 
 options[:src_dir] = File.expand_path options[:src_dir]
 options[:dst_dir] = File.expand_path options[:dst_dir]
