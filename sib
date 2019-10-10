@@ -79,7 +79,7 @@ if options[:action] == :backup
       next if SKIPPED_FTYPES.include?(s.ftype)
   
       fkey = fp[options[:src_size] .. -1] # trim base path
-      db[fkey]  = [s.gid, s.uid, s.mode].join('|') + '/' + [s.ftype[0], s.size, s.mtime.to_i].join('|')
+      db[fkey]  = [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|')
       db[fkey] += "|#{File.readlink(fp)}" if s.symlink?
   
       log.puts "#{db[fkey]}\t#{fkey}"
@@ -126,23 +126,23 @@ if options[:action] == :backup
   diffs  = {} # files with different GID/UID/Mode
   old_db.each do |name, o_props|
     if c_props = cur_db[name]
-      # gestire cambio da file a directory
-      # gestire cambio attr cartella!
-      if o_props != c_props
-        o_gum, o_tsm = o_props.split('/')
-        c_gum, c_tsm = c_props.split('/')
-        if o_tsm != c_tsm 
-          to_arc << name if c_tsm[0] != 'd' # don't archive directories
-        else
-          o_gid, o_uid, o_mode, o_link = o_gum.split("|")
-          c_gid, c_uid, c_mode, c_link = c_gum.split("|")
-          link_changed = o_link != c_link
-          diffs[name] = {}
-          diffs[name][:gid ] = c_gid .to_i if o_gid  != c_gid || link_changed
-          diffs[name][:uid ] = c_uid .to_i if o_uid  != c_uid || link_changed
-          diffs[name][:mode] = c_mode.to_i if c_tsm[0] != 'l' && o_mode != c_mode # a link has always 777
-          diffs[name][:link] = c_link if link_changed
-        end
+      o_gid, o_uid, o_mode, o_type, o_size, o_mtime, o_link = o_props.split("|")
+      c_gid, c_uid, c_mode, c_type, c_size, c_mtime, c_link = c_props.split("|")
+
+      if "#{o_type}#{c_type}" != 'dd' && "#{o_size}|#{o_mtime}" != "#{c_size}|#{c_mtime}"
+        to_arc << name #unless c_type == 'd' && !Dir.empty?(File.join options[:src_dir], name)
+      end
+
+      if o_type == c_type
+        link_changed = o_link != c_link
+        diffs[name] = {}
+        diffs[name][:gid ] = c_gid .to_i if o_gid != c_gid || link_changed
+        diffs[name][:uid ] = c_uid .to_i if o_uid != c_uid || link_changed
+        diffs[name][:mode] = c_mode.to_i if c_type != 'l' && o_mode != c_mode # a link has always 777
+        diffs[name][:link] = c_link if link_changed
+        diffs.delete name if diffs[name].empty?
+      else
+        diffs[name] = :rm
       end
       
       cur_db.delete name
@@ -186,22 +186,16 @@ if options[:action] == :restore
   versions.each do |ver|
     print "#{File.basename(ver)}: "
     
-    if fname = Dir[File.join ver, 'files.???'].first
-      die("unsupported compression!", 3) unless tar_compr = TAR_COMPR[fname.split('.').last]
-      print "untar... "
-      system "tar #{TAR_OPTS} -C #{options[:src_dir]} #{tar_compr} -xf #{fname.shellescape}"
-    end
-    
     if fname = Dir[File.join ver, 'diff.ymz'].first
       changes = Zlib::GzipReader.open(fname){|gz| YAML.load gz }
       die("unsupported format!", 4) unless changes.is_a?(Hash)
-      print "replay diff... "
+      print "diff... "
       changes.each do |fname, chg|
         fname = File.join(options[:src_dir], fname)
         die("file not found [#{fname}]", 5) unless File.exist?(fname)
         
         if chg == :rm
-          File.unlink(fname)
+          FileUtils.rm_rf fname
         elsif chg.is_a?(Hash)
           if chg[:link]
             File.unlink fname
@@ -214,9 +208,15 @@ if options[:action] == :restore
           end
           File.chmod(chg[:mode], fname) if chg[:mode]
         else
-          die "diff element unknown [#{chg.inspect}]", 6
+          die "diff instruction unknown [#{chg.inspect}]", 6
         end
       end
+    end
+    
+    if fname = Dir[File.join ver, 'files.???'].first
+      die("unsupported compression!", 3) unless tar_compr = TAR_COMPR[fname.split('.').last]
+      print "untar... "
+      system "tar #{TAR_OPTS} -C #{options[:src_dir]} #{tar_compr} -xf #{fname.shellescape}"
     end
     
     puts ''
