@@ -35,6 +35,7 @@ optparser = OptionParser.new do |op|
   op.on('-b', '--backup'              , "create/update the incremental backup"        ){ options.merge! action: :backup }
   op.on('-r', '--restore'             , "restores the last version of the backup"     ){ options.merge! action: :restore, target: :last }
   op.on('-R', '--restore-ts TIMESTAMP', "restores the specified version of the backup"){|ts| options.merge! action: :restore, target: ts }
+  op.on('-l', '--list-ts'             , "show available versions to restore"          ){ options.merge! action: :list_ts }
   op.on('-x', '--one-file-system'     , "don't cross filesystem boundaries"           ){ options.merge! one_fs: true }
   op.on('-g', '--gzip'                , "use gzip instead of xz"                      ){ options.merge! zip_zip: :gzip, zip_ext: :tgz }
   op.on('-G', '--pigz'                , "use pigz instead of xz"                      ){ options.merge! zip_zip: :pigz, zip_ext: :tgz }
@@ -63,6 +64,11 @@ options[:src_dev] = File.lstat(options[:src_dir]).dev
 # number of chars to trim from beginnin of file names to store them on the DB
 options[:src_size]  = options[:src_dir].size
 options[:src_size] += 1 if options[:src_dir] != '/'
+
+# --- listing available versions -----------------------------------------------
+if options[:action] == :list_ts
+  puts Dir.chdir(options[:dst_dir]){ Dir['????-??-??_??-??-??'].sort{|a,b| b<=>a } }
+end
 
 # --- performing backup --------------------------------------------------------
 if options[:action] == :backup
