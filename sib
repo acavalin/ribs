@@ -5,7 +5,6 @@ require 'fileutils'
 require 'shellwords'
 require 'zlib'
 require 'yaml'
-#require 'byebug'
 
 $VERBOSE = nil
 STDOUT.sync = true
@@ -19,12 +18,15 @@ SKIPPED_FOLDERS = %w{ . .. }
 
 def die(msg, exit_code = 0); puts msg; exit exit_code; end
 
+die "you are not root!" if Process.uid != 0
+
 # --- setup options ------------------------------------------------------------
 # default options
 options = {
   src_dir:  nil,
   dst_dir:  nil,
-  one_fs:   false,
+  one_fs:   true,
+  perms:    true,
   zip_zip:  :xz,
   zip_ext:  :txz,
 }
@@ -32,14 +34,15 @@ options = {
 # imposta opzioni da riga di comando
 optparser = OptionParser.new do |op|
   op.banner = "USAGE: #{File.basename $0} [switches] <repository-folder> <target-folder>"
-  op.on('-b', '--backup'              , "create/update the incremental backup"        ){ options.merge! action: :backup }
-  op.on('-r', '--restore'             , "restores the last version of the backup"     ){ options.merge! action: :restore, target: :last }
-  op.on('-R', '--restore-ts TIMESTAMP', "restores the specified version of the backup"){|ts| options.merge! action: :restore, target: ts }
-  op.on('-l', '--list-ts'             , "show available versions to restore"          ){ options.merge! action: :list_ts }
-  op.on('-x', '--one-file-system'     , "don't cross filesystem boundaries"           ){ options.merge! one_fs: true }
-  op.on('-g', '--gzip'                , "use gzip instead of xz"                      ){ options.merge! zip_zip: :gzip, zip_ext: :tgz }
-  op.on('-G', '--pigz'                , "use pigz instead of xz"                      ){ options.merge! zip_zip: :pigz, zip_ext: :tgz }
-  op.on('-h', '--help'                , 'display this help'                           ){ puts op; exit 1 }
+  op.on('-b', '--backup'              , "update the incremental backup repo"   ){ options.merge! action: :backup }
+  op.on('-r', '--restore'             , "restores the last backup version"     ){ options.merge! action: :restore, target: :last }
+  op.on('-R', '--restore-ts TIMESTAMP', "restores the specified backup version"){|ts| options.merge! action: :restore, target: ts }
+  op.on('-l', '--list-ts'             , "show available restorable versions"   ){ options.merge! action: :list_ts }
+  op.on('-g', '--gzip'                , "use gzip instead of xz"               ){ options.merge! zip_zip: :gzip, zip_ext: :tgz }
+  op.on('-G', '--pigz'                , "use parallel gzip instead of xz"      ){ options.merge! zip_zip: :pigz, zip_ext: :tgz }
+  op.on('-x', '--[no-]one-file-system', "don't cross filesystem boundaries        Def. #{options[:one_fs]}"){|v| options.merge! one_fs: v }
+  op.on('-p', '--[no-]permissions'    , "store files permissions (gid/uid/modes)  Def. #{options[:perms] }"){|v| options.merge! perms:  v }
+  op.on('-h', '--help'                , 'display this help'                    ){ puts op; exit 1 }
 end
 
 begin
@@ -74,7 +77,7 @@ end
 if options[:action] == :backup
   # recursively scan folder, build DB, and write log file
   def stat_folder(folder, db, log, options)
-    print "#{db.size} files\r"
+    print "#{db.size} files found\r"
     
     Dir.entries(folder).each do |f|
       next if SKIPPED_FOLDERS.include?(f)
@@ -85,7 +88,9 @@ if options[:action] == :backup
       next if SKIPPED_FTYPES.include?(s.ftype)
   
       fkey = fp[options[:src_size] .. -1] # trim base path
-      db[fkey]  = [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|')
+      db[fkey]  = options[:perms] ?
+        [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|') :
+        [nil, nil, nil, s.ftype[0], s.size, s.mtime.to_i].join('|')
       db[fkey] += "|#{File.readlink(fp)}" if s.symlink?
   
       log.puts "#{db[fkey]}\t#{fkey}"
@@ -105,7 +110,7 @@ if options[:action] == :backup
   Zlib::GzipWriter.open(File.join cur_ts, 'stats.dat') do |gz|
     gz.mtime, gz.orig_name = Time.now, 'stats.dat'
     stat_folder options[:src_dir], cur_db, gz, options
-    puts "#{cur_db.size} files"
+    puts "#{cur_db.size} files found"
   end
   
   # load previous data from disk
@@ -144,9 +149,11 @@ if options[:action] == :backup
       if o_type == c_type
         link_changed = o_link != c_link
         diffs[name] = {}
-        diffs[name][:gid ] = c_gid .to_i if o_gid != c_gid || link_changed
-        diffs[name][:uid ] = c_uid .to_i if o_uid != c_uid || link_changed
-        diffs[name][:mode] = c_mode.to_i if c_type != 'l' && o_mode != c_mode # a link has always 777
+        if options[:perms]
+          diffs[name][:gid ] = c_gid .to_i if o_gid != c_gid || link_changed
+          diffs[name][:uid ] = c_uid .to_i if o_uid != c_uid || link_changed
+          diffs[name][:mode] = c_mode.to_i if c_type != 'l' && o_mode != c_mode # a link has always 777
+        end
         diffs[name][:link] = c_link if link_changed
         diffs.delete name if diffs[name].empty?
       else
