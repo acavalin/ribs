@@ -124,14 +124,16 @@ if options[:action] == :backup
   # compare the last two DBs
   to_arc = [] # files to archive (different type/size/mtime)
   diffs  = {} # files with different GID/UID/Mode
+  skip_dir = nil # skip entries in this folder
   old_db.each do |name, o_props|
+    next if skip_dir && name.start_with?("#{skip_dir}/")
+    skip_dir = nil
+    
     if c_props = cur_db[name]
       o_gid, o_uid, o_mode, o_type, o_size, o_mtime, o_link = o_props.split("|")
       c_gid, c_uid, c_mode, c_type, c_size, c_mtime, c_link = c_props.split("|")
 
-      if "#{o_type}#{c_type}" != 'dd' && "#{o_size}|#{o_mtime}" != "#{c_size}|#{c_mtime}"
-        to_arc << name #unless c_type == 'd' && !Dir.empty?(File.join options[:src_dir], name)
-      end
+      to_arc << name if "#{o_type}#{c_type}" != 'dd' && "#{o_size}|#{o_mtime}" != "#{c_size}|#{c_mtime}"
 
       if o_type == c_type
         link_changed = o_link != c_link
@@ -143,6 +145,13 @@ if options[:action] == :backup
         diffs.delete name if diffs[name].empty?
       else
         diffs[name] = :rm
+        if c_type == 'd'      # typechange: from * to directory
+          # avoid archiving files from an already archived parent folder
+          cur_db.keys.each{|k| cur_db.delete k if k.start_with?("#{name}/") }
+        elsif o_type == 'd'   # typechange: from directory to *
+          # do not delete files from an already deleted parent folder
+          skip_dir = name
+        end
       end
       
       cur_db.delete name
@@ -224,5 +233,3 @@ if options[:action] == :restore
     break if ver.end_with? options[:target]
   end
 end
-
-# ignore files?
