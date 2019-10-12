@@ -26,6 +26,12 @@ options = {
   src_dir:  nil,
   dst_dir:  nil,
   one_fs:   true,
+  one_fs_skipped: [],
+  exclude: %w{
+    /var/tmp/*
+    /var/log/*.?.gz
+    /var/backups/*.?.gz
+  },
   perms:    true,
   zip_zip:  :xz,
   zip_ext:  :txz,
@@ -42,7 +48,15 @@ optparser = OptionParser.new do |op|
   op.on('-G', '--pigz'                , "use parallel gzip instead of xz"      ){ options.merge! zip_zip: :pigz, zip_ext: :tgz }
   op.on('-x', '--[no-]one-file-system', "don't cross filesystem boundaries        Def. #{options[:one_fs]}"){|v| options.merge! one_fs: v }
   op.on('-p', '--[no-]permissions'    , "store files permissions (gid/uid/modes)  Def. #{options[:perms] }"){|v| options.merge! perms:  v }
-  op.on('-h', '--help'                , 'display this help'                    ){ puts op; exit 1 }
+  op.on('-h', '--help'                , 'display this help'                    ){
+    puts "#{op}\n"
+    puts <<~END
+      Some files are automatically excluded, you can insert any additional GLOBs patterns
+      by wrinting them in repo_dir/exclude.yml. This is the default list:
+      #{options[:exclude].map{|i| "  - #{i}\n"}.join }
+    END
+    exit 1
+  }
 end
 
 begin
@@ -88,6 +102,18 @@ if options[:action] == :backup
       next if SKIPPED_FTYPES.include?(s.ftype)
   
       fkey = fp[options[:src_size] .. -1] # trim base path
+      
+      if options[:one_fs] && s.directory? && options[:src_dev] != s.dev
+        STDERR.puts "SKIPPED #{fp.ljust(40)}"
+        options[:one_fs_skipped] << fkey
+        next
+      end
+
+      if options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{fkey}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
+        STDERR.puts "EXCLUDE #{fp.ljust(40)}"
+        next
+      end
+
       db[fkey]  = options[:perms] ?
         [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|') :
         [nil, nil, nil, s.ftype[0], s.size, s.mtime.to_i].join('|')
@@ -95,12 +121,14 @@ if options[:action] == :backup
   
       log.puts "#{db[fkey]}\t#{fkey}"
   
-      STDERR.puts fp.ljust(40) if s.directory? && options[:src_dev] != s.dev
-      
       stat_folder(fp, db, log, options) if s.directory? && options[:src_dev] == s.dev
     end
   end # stat_folder
-  
+
+  # read exclude pattern list
+  fname = File.join options[:dst_dir], 'exclude.yml'
+  options[:exclude] += YAML.load_file(fname) if File.exist?(fname)
+
   # create base folder in the repository
   cur_ts = File.join options[:dst_dir], Time.now.strftime('%F_%H-%M-%S')
   FileUtils.mkdir_p cur_ts
@@ -112,7 +140,7 @@ if options[:action] == :backup
     stat_folder options[:src_dir], cur_db, gz, options
     puts "#{cur_db.size} files found"
   end
-  
+
   # load previous data from disk
   old_ts = Dir[File.join options[:dst_dir], '????-??-??_??-??-??'].sort[-2..-2]
   old_ts = old_ts.first if old_ts.is_a?(Array)
@@ -131,12 +159,20 @@ if options[:action] == :backup
     system "tar #{TAR_OPTS} -cf - . | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
     exit
   end
-  
+
   # compare the last two DBs
   to_arc = [] # files to archive (different type/size/mtime)
   diffs  = {} # files with different GID/UID/Mode
   skip_dir = nil # skip entries in this folder
   old_db.each do |name, o_props|
+    if options[:one_fs_skipped].include?(name)
+      options[:one_fs_skipped].delete name
+      skip_dir = name
+      next
+    end
+ 
+    next if options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{name}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
+    
     next if skip_dir && name.start_with?("#{skip_dir}/")
     skip_dir = nil
     
@@ -170,6 +206,8 @@ if options[:action] == :backup
       cur_db.delete name
     else
       diffs[name] = :rm
+      # do not delete files from an already deleted parent folder
+      skip_dir = name
     end
   end
   to_arc += cur_db.keys # add new files
