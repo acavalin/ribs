@@ -215,12 +215,12 @@ if options[:action] == :backup
   # archive changed/new files
   if to_arc.size > 0
     puts "#{to_arc.size} new/modified files"
-    flist = File.join(cur_ts, 'arc-list.tmp')
+    flist = File.join(cur_ts, 'files.list')
     fdest = File.join(cur_ts, "files.#{options[:zip_ext]}")
     File.open(flist, 'w'){|f| f.puts to_arc }
     tar_opts = "-C #{options[:src_dir]} -cf - --verbatim-files-from --files-from #{flist.shellescape}"
     system "tar #{TAR_OPTS} #{tar_opts} | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
-    File.unlink flist
+    system "gzip #{flist.shellescape}"
   end
   
   # save differences in UID/GID/Mode
