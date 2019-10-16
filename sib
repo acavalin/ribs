@@ -20,9 +20,16 @@ def die(msg, exit_code = 0); puts msg; exit exit_code; end
 
 die "you are not root!" if Process.uid != 0
 
+def on_interrupt_clean_and_exit
+  FileUtils.rm_rf $options[:backup_dir] if $options[:backup_dir] && File.exist?($options[:backup_dir])
+  exit 100
+end # on_interrupt_clean_and_exit
+Signal.trap('INT' ) { on_interrupt_clean_and_exit }
+Signal.trap('QUIT') { on_interrupt_clean_and_exit }
+
 # --- setup options ------------------------------------------------------------
 # default options
-options = {
+$options = {
   src_dir:  nil,
   dst_dir:  nil,
   one_fs:   true,
@@ -40,20 +47,20 @@ options = {
 # imposta opzioni da riga di comando
 optparser = OptionParser.new do |op|
   op.banner = "USAGE: #{File.basename $0} [switches] <repository-folder> <target-folder>"
-  op.on('-b', '--backup'              , "update the incremental backup repo"   ){ options.merge! action: :backup }
-  op.on('-r', '--restore'             , "restores the last backup version"     ){ options.merge! action: :restore, target: :last }
-  op.on('-R', '--restore-ts TIMESTAMP', "restores the specified backup version"){|ts| options.merge! action: :restore, target: ts }
-  op.on('-l', '--list-ts'             , "show available restorable versions"   ){ options.merge! action: :list_ts }
-  op.on('-g', '--gzip'                , "use gzip instead of xz"               ){ options.merge! zip_zip: :gzip, zip_ext: :tgz }
-  op.on('-G', '--pigz'                , "use parallel gzip instead of xz"      ){ options.merge! zip_zip: :pigz, zip_ext: :tgz }
-  op.on('-x', '--[no-]one-file-system', "don't cross filesystem boundaries        Def. #{options[:one_fs]}"){|v| options.merge! one_fs: v }
-  op.on('-p', '--[no-]permissions'    , "store files permissions (gid/uid/modes)  Def. #{options[:perms] }"){|v| options.merge! perms:  v }
+  op.on('-l', '--list-ts'             , "show available restorable versions"   ){ $options.merge! action: :list_ts }
+  op.on('-b', '--backup'              , "update the incremental backup repo"   ){ $options.merge! action: :backup }
+  op.on('-r', '--restore'             , "restores the last backup version"     ){ $options.merge! action: :restore, target: :last }
+  op.on('-R', '--restore-ts TIMESTAMP', "restores the specified backup version"){|ts| $options.merge! action: :restore, target: ts }
+  op.on('-g', '--gzip'                , "use gzip instead of xz"               ){ $options.merge! zip_zip: :gzip, zip_ext: :tgz }
+  op.on('-G', '--pigz'                , "use parallel gzip instead of xz"      ){ $options.merge! zip_zip: :pigz, zip_ext: :tgz }
+  op.on('-x', '--[no-]one-file-system', "don't cross filesystem boundaries        Def. #{$options[:one_fs]}"){|v| $options.merge! one_fs: v }
+  op.on('-p', '--[no-]permissions'    , "store files permissions (gid/uid/modes)  Def. #{$options[:perms] }"){|v| $options.merge! perms:  v }
   op.on('-h', '--help'                , 'display this help'                    ){
     puts "#{op}\n"
     puts <<~END
       Some files are automatically excluded, you can insert any additional GLOBs patterns
       by wrinting them in repo_dir/exclude.yml. This is the default list:
-      #{options[:exclude].map{|i| "  - #{i}\n"}.join }
+      #{$options[:exclude].map{|i| "  - #{i}\n"}.join }
     END
     exit 1
   }
@@ -61,36 +68,34 @@ end
 
 begin
   optparser.parse! ARGV
-rescue OptionParser::ParseError
-  die $!, 1
-rescue SystemExit
-  exit 1
+rescue OptionParser::ParseError ; die $!, 1
+rescue SystemExit               ; exit 1
 end
 
-options[:dst_dir], options[:src_dir] = ARGV
+$options[:dst_dir], $options[:src_dir] = ARGV
 
-die("invalid repository", 1) unless options[:dst_dir] && File.exist?(options[:dst_dir])
-die("invalid target"    , 1) unless options[:src_dir] && File.exist?(options[:src_dir])
-die("no b/r/l switch fround", 1) unless options[:action]
+die("invalid repository", 1) unless $options[:dst_dir] && File.exist?($options[:dst_dir])
+die("invalid target"    , 1) unless $options[:src_dir] && File.exist?($options[:src_dir])
+die("no b/r/l switch fround", 1) unless $options[:action]
 
-options[:src_dir] = File.expand_path options[:src_dir]
-options[:dst_dir] = File.expand_path options[:dst_dir]
+$options[:src_dir] = File.expand_path $options[:src_dir]
+$options[:dst_dir] = File.expand_path $options[:dst_dir]
 
-options[:src_dev] = File.lstat(options[:src_dir]).dev
+$options[:src_dev] = File.lstat($options[:src_dir]).dev
 
 # number of chars to trim from beginnin of file names to store them on the DB
-options[:src_size]  = options[:src_dir].size
-options[:src_size] += 1 if options[:src_dir] != '/'
+$options[:src_size]  = $options[:src_dir].size
+$options[:src_size] += 1 if $options[:src_dir] != '/'
 
 # --- listing available versions -----------------------------------------------
-if options[:action] == :list_ts
-  puts Dir.chdir(options[:dst_dir]){ Dir['????-??-??_??-??-??'].sort{|a,b| b<=>a } }
+if $options[:action] == :list_ts
+  puts Dir.chdir($options[:dst_dir]){ Dir['????-??-??_??-??-??'].sort{|a,b| b<=>a } }
 end
 
 # --- performing backup --------------------------------------------------------
-if options[:action] == :backup
+if $options[:action] == :backup
   # recursively scan folder, build DB, and write log file
-  def stat_folder(folder, db, log, options)
+  def stat_folder(folder, db, log)
     print "#{db.size} files found\r"
     
     Dir.entries(folder).each do |f|
@@ -101,48 +106,48 @@ if options[:action] == :backup
   
       next if SKIPPED_FTYPES.include?(s.ftype)
   
-      fkey = fp[options[:src_size] .. -1] # trim base path
+      fkey = fp[$options[:src_size] .. -1] # trim base path
       
-      if options[:one_fs] && s.directory? && options[:src_dev] != s.dev
+      if $options[:one_fs] && s.directory? && $options[:src_dev] != s.dev
         STDERR.puts "SKIPPED #{fp.ljust(40)}"
-        options[:one_fs_skipped] << fkey
+        $options[:one_fs_skipped] << fkey
         next
       end
 
-      if options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{fkey}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
+      if $options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{fkey}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
         STDERR.puts "EXCLUDE #{fp.ljust(40)}"
         next
       end
 
-      db[fkey]  = options[:perms] ?
+      db[fkey]  = $options[:perms] ?
         [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|') :
         [nil, nil, nil, s.ftype[0], s.size, s.mtime.to_i].join('|')
       db[fkey] += "|#{File.readlink(fp)}" if s.symlink?
   
       log.puts "#{db[fkey]}\t#{fkey}"
   
-      stat_folder(fp, db, log, options) if s.directory? && options[:src_dev] == s.dev
+      stat_folder(fp, db, log) if s.directory? && $options[:src_dev] == s.dev
     end
   end # stat_folder
 
   # read exclude pattern list
-  fname = File.join options[:dst_dir], 'exclude.yml'
-  options[:exclude] += YAML.load_file(fname) if File.exist?(fname)
+  fname = File.join $options[:dst_dir], 'exclude.yml'
+  $options[:exclude] += YAML.load_file(fname) if File.exist?(fname)
 
   # create base folder in the repository
-  cur_ts = File.join options[:dst_dir], Time.now.strftime('%F_%H-%M-%S')
+  cur_ts = $options[:backup_dir] = File.join $options[:dst_dir], Time.now.strftime('%F_%H-%M-%S')
   FileUtils.mkdir_p cur_ts
   
   # populate current data
   cur_db = {} # file_path => stat data
   Zlib::GzipWriter.open(File.join cur_ts, 'stats.dat') do |gz|
     gz.mtime, gz.orig_name = Time.now, 'stats.dat'
-    stat_folder options[:src_dir], cur_db, gz, options
+    stat_folder $options[:src_dir], cur_db, gz
     puts "#{cur_db.size} files found"
   end
 
   # load previous data from disk
-  old_ts = Dir[File.join options[:dst_dir], '????-??-??_??-??-??'].sort[-2..-2]
+  old_ts = Dir[File.join $options[:dst_dir], '????-??-??_??-??-??'].sort[-2..-2]
   old_ts = old_ts.first if old_ts.is_a?(Array)
   old_db = {} # file_path => stat data
   Zlib::GzipReader.open(File.join old_ts, 'stats.dat') do |gz|
@@ -154,9 +159,9 @@ if options[:action] == :backup
   
   # it's the first backup, do it and exit
   unless old_ts
-    Dir.chdir options[:src_dir]
-    fdest = File.join(cur_ts, "files.#{options[:zip_ext]}").shellescape
-    system "tar #{TAR_OPTS} -cf - . | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
+    Dir.chdir $options[:src_dir]
+    fdest = File.join(cur_ts, "files.#{$options[:zip_ext]}").shellescape
+    system "tar #{TAR_OPTS} -cf - . | pv -N archiving -w 40 | #{$options[:zip_zip]} -c > #{fdest}"
     exit
   end
 
@@ -165,13 +170,13 @@ if options[:action] == :backup
   diffs  = {} # files with different GID/UID/Mode
   skip_dir = nil # skip entries in this folder
   old_db.each do |name, o_props|
-    if options[:one_fs_skipped].include?(name)
-      options[:one_fs_skipped].delete name
+    if $options[:one_fs_skipped].include?(name)
+      $options[:one_fs_skipped].delete name
       skip_dir = name
       next
     end
  
-    next if options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{name}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
+    next if $options[:exclude].any?{|pattern| File.fnmatch pattern, "/#{name}", File::FNM_DOTMATCH | File::FNM_EXTGLOB }
     
     next if skip_dir && name.start_with?("#{skip_dir}/")
     skip_dir = nil
@@ -185,7 +190,7 @@ if options[:action] == :backup
       if o_type == c_type
         link_changed = o_link != c_link
         diffs[name] = {}
-        if options[:perms]
+        if $options[:perms]
           diffs[name][:gid ] = c_gid .to_i if o_gid != c_gid || link_changed
           diffs[name][:uid ] = c_uid .to_i if o_uid != c_uid || link_changed
           diffs[name][:mode] = c_mode.to_i if c_type != 'l' && o_mode != c_mode # a link has always 777
@@ -216,10 +221,10 @@ if options[:action] == :backup
   if to_arc.size > 0
     puts "#{to_arc.size} new/modified files"
     flist = File.join(cur_ts, 'files.list')
-    fdest = File.join(cur_ts, "files.#{options[:zip_ext]}")
+    fdest = File.join(cur_ts, "files.#{$options[:zip_ext]}")
     File.open(flist, 'w'){|f| f.puts to_arc }
-    tar_opts = "-C #{options[:src_dir]} -cf - --verbatim-files-from --files-from #{flist.shellescape}"
-    system "tar #{TAR_OPTS} #{tar_opts} | pv -N archiving -w 40 | #{options[:zip_zip]} -c > #{fdest}"
+    tar_opts = "-C #{$options[:src_dir]} -cf - --verbatim-files-from --files-from #{flist.shellescape}"
+    system "tar #{TAR_OPTS} #{tar_opts} | pv -N archiving -w 40 | #{$options[:zip_zip]} -c > #{fdest}"
     system "gzip #{flist.shellescape}"
   end
   
@@ -237,11 +242,11 @@ if options[:action] == :backup
 end # action :backup
 
 # --- performing restore -------------------------------------------------------
-if options[:action] == :restore
-  versions = Dir[File.join options[:dst_dir], '????-??-??_??-??-??'].sort
-  options[:target] = versions.last if options[:target] == :last
+if $options[:action] == :restore
+  versions = Dir[File.join $options[:dst_dir], '????-??-??_??-??-??'].sort
+  $options[:target] = versions.last if $options[:target] == :last
   
-  die("non existent version [#{options[:target]}]", 2) unless versions.any?{|v| v.end_with? options[:target] }
+  die("non existent version [#{$options[:target]}]", 2) unless versions.any?{|v| v.end_with? $options[:target] }
   
   versions.each do |ver|
     print "#{File.basename(ver)}: "
@@ -251,7 +256,7 @@ if options[:action] == :restore
       die("unsupported format!", 4) unless changes.is_a?(Hash)
       print "diff... "
       changes.each do |fname, chg|
-        fname = File.join(options[:src_dir], fname)
+        fname = File.join($options[:src_dir], fname)
         die("file not found [#{fname}]", 5) unless File.exist?(fname)
         
         if chg == :rm
@@ -276,11 +281,11 @@ if options[:action] == :restore
     if fname = Dir[File.join ver, 'files.???'].first
       die("unsupported compression!", 3) unless tar_compr = TAR_COMPR[fname.split('.').last]
       print "untar... "
-      system "tar #{TAR_OPTS} -C #{options[:src_dir]} #{tar_compr} -xf #{fname.shellescape}"
+      system "tar #{TAR_OPTS} -C #{$options[:src_dir]} #{tar_compr} -xf #{fname.shellescape}"
     end
     
     puts ''
     
-    break if ver.end_with? options[:target]
+    break if ver.end_with? $options[:target]
   end
 end
