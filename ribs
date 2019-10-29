@@ -157,11 +157,12 @@ if $options[:action] == :backup
     end
   end if old_ts
   
-  # it's the first backup, do it and exit
+  # if it's the first backup, do it and exit
   unless old_ts
     Dir.chdir $options[:src_dir]
     fdest = File.join(cur_ts, "files.#{$options[:zip_ext]}").shellescape
-    system "tar #{TAR_OPTS} -cf - . | pv -N archiving -w 40 | #{$options[:zip_zip]} -c > #{fdest}"
+    tar_opts = $options[:exclude].map{|p| "--exclude=.#{p.shellescape}" }.join(' ')
+    system "tar #{TAR_OPTS} #{tar_opts} -cf - . | pv -N archiving -w 40 | #{$options[:zip_zip]} -c > #{fdest}"
     exit
   end
 
