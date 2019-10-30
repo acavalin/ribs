@@ -27,11 +27,17 @@ end # on_interrupt_clean_and_exit
 Signal.trap('INT' ) { on_interrupt_clean_and_exit }
 Signal.trap('QUIT') { on_interrupt_clean_and_exit }
 
+def bin_exist?(name)
+  `which #{name.shellescape}`
+  $?.to_i == 0
+end # bin_exist?
+
 # --- setup options ------------------------------------------------------------
 # default options
 $options = {
   src_dir:  nil,
   dst_dir:  nil,
+  perms:    true,
   one_fs:   true,
   one_fs_skipped: [],
   exclude: %w{
@@ -39,10 +45,13 @@ $options = {
     /var/log/*.?.gz
     /var/backups/*.?.gz
   },
-  perms:    true,
-  zip_zip:  :xz,
-  zip_ext:  :txz,
 }
+
+# find an usable compression utility
+$options.merge!(zip_zip: :pixz, zip_ext: :txz) if $options[:zip_zip].nil? && bin_exist?('pixz')
+$options.merge!(zip_zip: :xz  , zip_ext: :txz) if $options[:zip_zip].nil? && bin_exist?('xz'  )
+$options.merge!(zip_zip: :pigz, zip_ext: :tgz) if $options[:zip_zip].nil? && bin_exist?('pigz')
+$options.merge!(zip_zip: :gz  , zip_ext: :tgz) if $options[:zip_zip].nil? && bin_exist?('gz'  )
 
 # imposta opzioni da riga di comando
 optparser = OptionParser.new do |op|
@@ -51,8 +60,7 @@ optparser = OptionParser.new do |op|
   op.on('-b', '--backup'              , "update the incremental backup repo"   ){ $options.merge! action: :backup }
   op.on('-r', '--restore'             , "restores the last backup version"     ){ $options.merge! action: :restore, target: :last }
   op.on('-R', '--restore-ts TIMESTAMP', "restores the specified backup version"){|ts| $options.merge! action: :restore, target: ts }
-  op.on('-g', '--gzip'                , "use gzip instead of xz"               ){ $options.merge! zip_zip: :gzip, zip_ext: :tgz }
-  op.on('-G', '--pigz'                , "use parallel gzip instead of xz"      ){ $options.merge! zip_zip: :pigz, zip_ext: :tgz }
+  op.on('-g', '--gzip'                , "force using pigz/gz"                  ){ $options.merge! zip_zip: (bin_exist?('pigz') ? :pigz : :gz), zip_ext: :tgz }
   op.on('-x', '--[no-]one-file-system', "don't cross filesystem boundaries        Def. #{$options[:one_fs]}"){|v| $options.merge! one_fs: v }
   op.on('-p', '--[no-]permissions'    , "store files permissions (gid/uid/modes)  Def. #{$options[:perms] }"){|v| $options.merge! perms:  v }
   op.on('-h', '--help'                , 'display this help'                    ){
