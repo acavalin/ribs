@@ -128,7 +128,7 @@ if $options[:action] == :backup
       end
 
       db[fkey]  = $options[:perms] ?
-        [s.gid, s.uid, s.mode, s.ftype[0], s.size, s.mtime.to_i].join('|') :
+        [s.gid, s.uid, s.mode.to_s(8).rjust(6,'0'), s.ftype[0], s.size, s.mtime.to_i].join('|') :
         [nil, nil, nil, s.ftype[0], s.size, s.mtime.to_i].join('|')
       db[fkey] += "|#{File.readlink(fp)}" if s.symlink?
   
@@ -202,7 +202,7 @@ if $options[:action] == :backup
         if $options[:perms]
           diffs[name][:gid ] = c_gid .to_i if o_gid != c_gid || link_changed
           diffs[name][:uid ] = c_uid .to_i if o_uid != c_uid || link_changed
-          diffs[name][:mode] = c_mode.to_i if c_type != 'l' && o_mode != c_mode # a link has always 777
+          diffs[name][:mode] = c_mode.to_s if c_type != 'l' && o_mode != c_mode # a link has always 777
         end
         diffs[name][:link] = c_link if link_changed
         diffs.delete name if diffs[name].empty?
@@ -280,7 +280,7 @@ if $options[:action] == :restore
             chg[:uid] ||= File.lstat(fname).uid
             File.lchown chg[:uid], chg[:gid], fname
           end
-          File.chmod(chg[:mode], fname) if chg[:mode]
+          File.chmod(chg[:mode].to_i(8), fname) if chg[:mode]
         else
           die "diff instruction unknown [#{chg.inspect}]", 6
         end
