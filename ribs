@@ -1,13 +1,10 @@
 #!/usr/bin/env ruby
 
-require 'optparse'
-require 'fileutils'
-require 'shellwords'
-require 'zlib'
-require 'yaml'
-
 $VERBOSE = nil
 STDOUT.sync = true
+Process.setproctitle 'ribs' # same as $0='title'
+
+%w{ optparse fileutils shellwords zlib yaml }.each{|l| require l }
 
 TAR_OPTS  = '--numeric-owner -p'
 TAR_COMPR = { 'txz' => '-J', 'tgz' => '-z' } # tar compression switches
