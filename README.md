@@ -8,7 +8,7 @@ file type, size, modification time and permissions.
 It stores all files stats and archives only modified files (type/size/mtime).
 
 ~~~
-USAGE: ribs [switches] <repository-folder> <target-folder>
+USAGE: ribs [switches] <repository-folder> <target-folder/device/image_file>
     -l, --list-ts                    show available restorable versions
     -b, --backup                     update the incremental backup repo
     -r, --restore                    restores the last backup version

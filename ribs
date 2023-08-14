@@ -4,7 +4,7 @@ $VERBOSE = nil
 STDOUT.sync = true
 Process.setproctitle 'ribs' # same as $0='title'
 
-%w{ optparse fileutils shellwords zlib yaml }.each{|l| require l }
+%w{ optparse fileutils tmpdir shellwords zlib yaml }.each{|l| require l }
 
 TAR_OPTS  = '--numeric-owner -p'
 TAR_COMPR = { 'txz' => '-J', 'tgz' => '-z' } # tar compression switches
@@ -24,14 +24,47 @@ end # on_interrupt_clean_and_exit
 Signal.trap('INT' ) { on_interrupt_clean_and_exit }
 Signal.trap('QUIT') { on_interrupt_clean_and_exit }
 
+at_exit { umount_blockdev }
+
 def bin_exist?(name)
   `which #{name.shellescape}`
   $?.to_i == 0
 end # bin_exist?
 
+def mount_blockdev(mount_options = [])
+  return unless $options[:device]
+  
+  $options[:src_dir ] = Dir.mktmpdir 'ribs.'
+  $options[:src_size] = $options[:src_dir].size + 1
+  
+  mount_options << 'loop' if File.file?($options[:src_dir])
+  `mount -o #{mount_options.join ','} #{$options[:device].shellescape} #{$options[:src_dir].shellescape}`
+  
+  if $?.to_i == 0
+    $options[:mounted ] = true
+  else
+    die("unable to mount block device", 1)
+  end
+end # mount_blockdev
+
+def umount_blockdev
+  return unless $options[:device ]
+  return unless $options[:mounted]
+  
+  Dir.chdir '/'
+  
+  `umount #{$options[:src_dir].shellescape}`
+  
+  $?.to_i == 0 ?
+    FileUtils.rm_rf($options[:src_dir]) :
+    puts("ERROR: unable to umount block device [#{$options[:device]}]")
+end # umount_blockdev
+
 # --- setup options ------------------------------------------------------------
 # default options
 $options = {
+  device:   nil,
+  mounted:  false,
   src_dir:  nil,
   dst_dir:  nil,
   perms:    true,
@@ -52,7 +85,7 @@ $options.merge!(zip_zip: :gz  , zip_ext: :tgz) if $options[:zip_zip].nil? && bin
 
 # imposta opzioni da riga di comando
 optparser = OptionParser.new do |op|
-  op.banner = "USAGE: #{File.basename $0} [switches] <repository-folder> <target-folder>"
+  op.banner = "USAGE: #{File.basename $0} [switches] <repository-folder> <target-folder/device/image_file>"
   op.on('-l', '--list-ts'             , "show available restorable versions"   ){ $options.merge! action: :list_ts }
   op.on('-b', '--backup'              , "update the incremental backup repo"   ){ $options.merge! action: :backup }
   op.on('-r', '--restore'             , "restores the last backup version"     ){ $options.merge! action: :restore, target: :last }
@@ -85,6 +118,7 @@ die("no b/r/l switch fround", 1) unless $options[:action]
 
 $options[:src_dir] = File.expand_path $options[:src_dir]
 $options[:dst_dir] = File.expand_path $options[:dst_dir]
+$options[:device ] = $options[:src_dir] if File.blockdev?($options[:src_dir]) || File.file?($options[:src_dir])
 
 $options[:src_dev] = File.lstat($options[:src_dir]).dev
 
@@ -110,7 +144,7 @@ if $options[:action] == :backup
       s  = File.lstat fp
   
       next if SKIPPED_FTYPES.include?(s.ftype)
-  
+      
       fkey = fp[$options[:src_size] .. -1] # trim base path
       
       if $options[:one_fs] && s.directory? && $options[:src_dev] != s.dev
@@ -142,6 +176,8 @@ if $options[:action] == :backup
   # create base folder in the repository
   cur_ts = $options[:backup_dir] = File.join $options[:dst_dir], Time.now.strftime('%F_%H-%M-%S')
   FileUtils.mkdir_p cur_ts
+  
+  mount_blockdev %w{ ro }
   
   # populate current data
   cur_db = {} # file_path => stat data
@@ -253,6 +289,8 @@ if $options[:action] == :restore
   $options[:target] = versions.last if $options[:target] == :last
   
   die("non existent version [#{$options[:target]}]", 2) unless versions.any?{|v| v.end_with? $options[:target] }
+  
+  mount_blockdev %w{ rw }
   
   versions.each do |ver|
     print "#{File.basename(ver)}: "
