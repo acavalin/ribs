@@ -42,6 +42,7 @@ def mount_blockdev(mount_options = [])
   
   if $?.to_i == 0
     $options[:mounted ] = true
+    $options[:src_dev] = File.lstat($options[:src_dir]).dev
   else
     die("unable to mount block device", 1)
   end
@@ -148,7 +149,7 @@ if $options[:action] == :backup
       fkey = fp[$options[:src_size] .. -1] # trim base path
       
       if $options[:one_fs] && s.directory? && $options[:src_dev] != s.dev
-        STDERR.puts "SKIPPED #{fp.ljust(40)}"
+        STDERR.puts "EXTRAFS #{fp.ljust(40)}"
         $options[:one_fs_skipped] << fkey
         next
       end
